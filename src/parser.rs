@@ -50,7 +50,28 @@ impl<R: Read> Parser<R> {
 
     fn read_function(&mut self) -> Result<Function, ParserError> {
         expect!(self, Token::OpenParen)?;
-        expect!(self, Token::CloseParen)?;
+
+        let mut parameters = Vec::new();
+        loop {
+            match self.next_token()? {
+                Some(Token::Identifier(name)) => {
+                    expect!(self, Token::TypeAnnotation)?;
+
+                    match self.next_token()? {
+                        Some(Token::Identifier(type_name)) =>
+                            parameters.push(Parameter {
+                                name,
+                                type_name,
+                            }),
+                        Some(tok) => return Err(ParserError::UnexpectedToken(tok)),
+                        None => return Err(ParserError::UnexpectedEof),
+                    }
+                },
+                Some(Token::CloseParen) => break,
+                Some(token) => return Err(ParserError::UnexpectedToken(token)),
+                None => return Err(ParserError::UnexpectedEof),
+            }
+        }
 
         let type_name = match self.next_token()? {
             Some(Token::Identifier(name)) => name,
@@ -59,7 +80,8 @@ impl<R: Read> Parser<R> {
         };
 
         Ok(Function {
-            type_name
+            parameters,
+            type_name,
         })
     }
 
@@ -81,6 +103,13 @@ pub enum DeclarationType {
 
 #[derive(Debug)]
 pub struct Function {
+    parameters: Vec<Parameter>,
+    type_name: String,
+}
+
+#[derive(Debug)]
+struct Parameter {
+    name: String,
     type_name: String,
 }
 

@@ -36,6 +36,7 @@ impl<R: Read> Lexer<R> {
 
             '(' => consume!(self, Token::OpenParen),
             ')' => consume!(self, Token::CloseParen),
+            ':' => consume!(self, Token::TypeAnnotation),
             ';' => consume!(self, Token::Terminator),
 
             ch => return Err(LexerError::UnexpectedCharacter(ch)),
@@ -94,6 +95,7 @@ pub enum Token {
 
     OpenParen,
     CloseParen,
+    TypeAnnotation,
     Terminator,
 }
 
