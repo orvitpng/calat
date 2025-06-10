@@ -1,21 +1,48 @@
-use crate::lexer::{self, Keyword, Lexer, Token};
+use crate::lexer::{Keyword, Lexer, Token};
 use std::io::Read;
 
-macro_rules! expect {
-    ($self:expr, Token::$variant:ident) => {
-        match $self.next_token()? {
-            Some(Token::$variant) => Ok(Token::$variant),
-            Some(token) => Err(ParserError::UnexpectedToken(token)),
-            None => Err(ParserError::UnexpectedEof),
+macro_rules! token_match {
+    ($self:expr, { $( $pattern:pat => $body:expr ),+ $( , )? }) => {
+        match $self.next_token() {
+            $( Ok($pattern) => $body, )*
+            Err(err) => Err(err),
         }
     };
-    ($self:expr, Token::$variant:ident(_)) => {
-        match $self.next_token()? {
-            Some(token @ Token::$variant(..)) => Ok(token),
-            Some(token) => Err(ParserError::UnexpectedToken(token)),
-            None => Err(ParserError::UnexpectedEof),
-        }
+    ($self:expr, Ok({ $( $pattern:pat => $body:expr ),+ $( , )? })) => {
+        token_match!($self, {
+            $( $pattern => Ok($body), )*
+        })
     };
+}
+
+macro_rules! token_match_some {
+    ($self:expr, { $( $pattern:pat => $body:expr ),+ $( , )? }) => {
+        token_match!($self, {
+            $( Some($pattern) => $body, )*
+            None => Err(ParserError::UnexpectedEof)
+        })
+    };
+    ($self:expr, Ok({ $( $pattern:pat => $body:expr ),+ $( , )? })) => {
+        token_match!($self, {
+            $( Some($pattern) => Ok($body), )*
+            None => Err(ParserError::UnexpectedEof)
+        })
+    };
+}
+
+macro_rules! token_match_one {
+    ($self:expr, $pattern:pat => $body:expr) => {
+        token_match_some!($self, {
+            $pattern => Ok($body),
+            token => Err(ParserError::UnexpectedToken(token)),
+        })
+    };
+}
+
+macro_rules! token_expect {
+    ($self:expr, $pattern:pat) => {
+        token_match_one!($self, value @ $pattern => value)
+    }
 }
 
 pub struct Parser<R: Read> {
@@ -28,56 +55,30 @@ impl<R: Read> Parser<R> {
         }
     }
 
-    pub fn next(&mut self) -> Result<Option<Declaration>, ParserError> {
-        match self.lexer.next().map_err(ParserError::Lexer)? {
-            Some(Token::Keyword(Keyword::Function)) => self.read_function_decl(),
-            Some(tok) => Err(ParserError::UnexpectedToken(tok)),
+    pub fn next(&mut self) -> ParserResult<Option<Declaration>> {
+        token_match!(self, {
+            Some(Token::Keyword(Keyword::Function)) =>
+                self.read_function_decl(),
+            Some(token) => Err(ParserError::UnexpectedToken(token)),
             None => Ok(None),
-        }
+        })
     }
 
-    fn read_function_decl(&mut self) -> Result<Option<Declaration>, ParserError> {
-        let name = match expect!(self, Token::Identifier(_))? {
-            Token::Identifier(name) => name,
-            _ => unreachable!(),
-        };
+    fn read_function_decl(&mut self) -> ParserResult<Option<Declaration>> {
+        let name = token_match_one!(self, Token::Identifier(name) => name)?;
 
         Ok(Some(Declaration {
             name,
-            kind: DeclarationType::Function(self.read_function()?),
+            kind: DeclarationType::Constant,
+            value: Expression::Function(self.read_function()?),
         }))
     }
 
-    fn read_function(&mut self) -> Result<Function, ParserError> {
-        expect!(self, Token::OpenParen)?;
-
-        let mut parameters = Vec::new();
-        loop {
-            match self.next_token()? {
-                Some(Token::Identifier(name)) => {
-                    expect!(self, Token::TypeAnnotation)?;
-
-                    match self.next_token()? {
-                        Some(Token::Identifier(type_name)) =>
-                            parameters.push(Parameter {
-                                name,
-                                type_name,
-                            }),
-                        Some(tok) => return Err(ParserError::UnexpectedToken(tok)),
-                        None => return Err(ParserError::UnexpectedEof),
-                    }
-                },
-                Some(Token::CloseParen) => break,
-                Some(token) => return Err(ParserError::UnexpectedToken(token)),
-                None => return Err(ParserError::UnexpectedEof),
-            }
-        }
-
-        let type_name = match self.next_token()? {
-            Some(Token::Identifier(name)) => name,
-            Some(token) => return Err(ParserError::UnexpectedToken(token)),
-            None => return Err(ParserError::UnexpectedEof),
-        };
+    fn read_function(&mut self) -> ParserResult<Function> {
+        let parameters = self.read_parameters()?;
+        token_expect!(self, Token::Colon)?;
+        let type_name =
+            token_match_one!(self, Token::Identifier(name) => name)?;
 
         Ok(Function {
             parameters,
@@ -85,7 +86,58 @@ impl<R: Read> Parser<R> {
         })
     }
 
-    fn next_token(&mut self) -> Result<Option<Token>, ParserError> {
+    fn read_parameters(&mut self) -> ParserResult<Parameters> {
+        token_expect!(self, Token::OpenParen)?;
+        let mut parameters = Vec::new();
+
+        if let Some(Token::CloseParen) =
+            self.lexer.peek().map_err(ParserError::Lexer)?
+        {
+            self.next_token()?;
+            return Ok(parameters);
+        }
+
+        loop {
+            println!("1 {:?}", self.lexer.peek());
+            let name = token_match_one!(self, Token::Identifier(name) => name)?;
+            println!("{:?}", self.lexer.peek());
+            token_expect!(self, Token::Colon)?;
+            println!("{:?}", self.lexer.peek());
+            let type_name = token_match_one!(self, Token::Identifier(name) => name)?;
+
+            parameters.push(Parameter {
+                name,
+                type_name,
+            });
+
+            token_match_some!(self, {
+                Token::Comma => {
+                    if let Some(Token::CloseParen) =
+                        self.lexer.peek().map_err(ParserError::Lexer)?
+                    {
+                        self.next_token()?;
+                        break;
+                    }
+                    continue;
+                },
+                Token::CloseParen => break,
+                token => Err(ParserError::UnexpectedToken(token)),
+            })?;
+        }
+
+        Ok(parameters)
+    }
+
+    fn next_token(&mut self) -> ParserResult<Option<Token>> {
+        loop {
+            match self.read_token()? {
+                Some(Token::Comment(_)) => continue,
+                other => return Ok(other),
+            }
+        }
+    }
+
+    fn read_token(&mut self) -> Result<Option<Token>, ParserError> {
         self.lexer.next().map_err(ParserError::Lexer)
     }
 }
@@ -94,28 +146,39 @@ impl<R: Read> Parser<R> {
 pub struct Declaration {
     name: String,
     kind: DeclarationType,
+    value: Expression,
 }
 
 #[derive(Debug)]
 pub enum DeclarationType {
-    Function(Function)
+    Constant,
+    Variable,
+    MutableVariable,
+}
+
+#[derive(Debug)]
+pub enum Expression {
+    Function(Function),
 }
 
 #[derive(Debug)]
 pub struct Function {
-    parameters: Vec<Parameter>,
     type_name: String,
+    parameters: Parameters,
 }
 
+pub type Parameters = Vec<Parameter>;
+
 #[derive(Debug)]
-struct Parameter {
+pub struct Parameter {
     name: String,
     type_name: String,
 }
 
-#[derive(Debug)]
+pub type ParserResult<T> = Result<T, ParserError>;
+
 pub enum ParserError {
     UnexpectedEof,
-    UnexpectedToken(lexer::Token),
-    Lexer(lexer::LexerError),
+    UnexpectedToken(Token),
+    Lexer(crate::lexer::LexerError),
 }
