@@ -19,22 +19,40 @@ macro_rules! token_match_some {
     ($self:expr, { $( $pattern:pat => $body:expr ),+ $( , )? }) => {
         token_match!($self, {
             $( Some($pattern) => $body, )*
-            None => Err(ParserError::UnexpectedEof)
+            None => Err(ParserError::UnexpectedEof),
         })
     };
-    ($self:expr, Ok({ $( $pattern:pat => $body:expr ),+ $( , )? })) => {
-        token_match!($self, {
-            $( Some($pattern) => Ok($body), )*
-            None => Err(ParserError::UnexpectedEof)
+    ($self:expr, Unexpected{ $( $pattern:pat => $body:expr ),+ $( , )? }) => {
+        token_match_some!($self, {
+            $( $pattern => $body, )*
+            token => Err(ParserError::UnexpectedToken(token)),
+        })
+    };
+    ($self:expr, Ok{ $( $pattern:pat => $body:expr ),+ $( , )? }) => {
+        token_match_some!($self, Unexpected{
+            $( $pattern => Ok($body), )*
         })
     };
 }
 
 macro_rules! token_match_one {
     ($self:expr, $pattern:pat => $body:expr) => {
-        token_match_some!($self, {
-            $pattern => Ok($body),
-            token => Err(ParserError::UnexpectedToken(token)),
+        token_match_some!($self, Ok{
+            $pattern => $body,
+        })
+    };
+}
+
+macro_rules! peek_if {
+    ($self:expr, $pattern:pat => $body:expr) => {
+        if let Some($pattern) = $self.peek_token()? {
+            $body
+        }
+    };
+    ($self:expr, $pattern:pat => $body:expr, consume) => {
+        peek_if!($self, $pattern => {
+            $self.next_token()?;
+            $body
         })
     };
 }
@@ -70,39 +88,32 @@ impl<R: Read> Parser<R> {
         Ok(Some(Declaration {
             name,
             kind: DeclarationType::Constant,
-            value: Expression::Function(self.read_function()?),
+            value: self.read_function()?,
         }))
     }
 
-    fn read_function(&mut self) -> ParserResult<Function> {
+    fn read_function(&mut self) -> ParserResult<Expression> {
         let parameters = self.read_parameters()?;
         token_expect!(self, Token::Colon)?;
         let type_name =
             token_match_one!(self, Token::Identifier(name) => name)?;
+        token_expect!(self, Token::Equals)?;
 
-        Ok(Function {
+        Ok(Expression::Function {
             parameters,
             type_name,
+            value: Box::new(self.read_expression()?),
         })
     }
 
-    fn read_parameters(&mut self) -> ParserResult<Parameters> {
+    fn read_parameters(&mut self) -> ParserResult<Vec<Parameter>> {
         token_expect!(self, Token::OpenParen)?;
         let mut parameters = Vec::new();
 
-        if let Some(Token::CloseParen) =
-            self.lexer.peek().map_err(ParserError::Lexer)?
-        {
-            self.next_token()?;
-            return Ok(parameters);
-        }
-
+        peek_if!(self, Token::CloseParen => return Ok(parameters), consume);
         loop {
-            println!("1 {:?}", self.lexer.peek());
             let name = token_match_one!(self, Token::Identifier(name) => name)?;
-            println!("{:?}", self.lexer.peek());
             token_expect!(self, Token::Colon)?;
-            println!("{:?}", self.lexer.peek());
             let type_name = token_match_one!(self, Token::Identifier(name) => name)?;
 
             parameters.push(Parameter {
@@ -110,22 +121,90 @@ impl<R: Read> Parser<R> {
                 type_name,
             });
 
-            token_match_some!(self, {
+            token_match_some!(self, Unexpected{
                 Token::Comma => {
-                    if let Some(Token::CloseParen) =
-                        self.lexer.peek().map_err(ParserError::Lexer)?
-                    {
-                        self.next_token()?;
+                    peek_if!(self, Token::CloseParen => break, consume);
+                    continue;
+                },
+                Token::CloseParen => break,
+            })?;
+        }
+
+        Ok(parameters)
+    }
+
+    fn read_expression(&mut self) -> ParserResult<Expression> {
+        token_match_some!(self, Ok{
+            Token::OpenBrace => self.read_block()?,
+            Token::Identifier(name) => self.read_or_call(name)?,
+        })
+    }
+
+    fn read_block(&mut self) -> ParserResult<Expression> {
+        let mut statements = Vec::new();
+
+        loop {
+            peek_if!(self, Token::CloseBrace => break, consume);
+
+            peek_if!(self, Token::Keyword(Keyword::Return) => {
+                let expr = if let Some(Token::Semicolon) = self.peek_token()? {
+                    None
+                } else {
+                    Some(self.read_expression()?)
+                };
+                token_expect!(self, Token::Semicolon)?;
+
+                statements.push(Statement::Return(expr));
+                continue;
+            }, consume);
+
+            let expr = self.read_expression()?;
+            token_match_some!(self, Ok{
+                Token::Semicolon =>
+                    statements.push(Statement::Expression(expr)),
+                Token::CloseBrace =>
+                    statements.push(Statement::Return(Some(expr))),
+            })?;
+        }
+
+        Ok(Expression::Block(statements))
+    }
+
+    fn read_or_call(&mut self, name: String) -> ParserResult<Expression> {
+        if let Some(Token::OpenParen) = self.peek_token()? {
+            self.next_token()?;
+            Ok(Expression::Call {
+                name,
+                arguments: self.read_arguments()?,
+            })
+        } else {
+            Ok(Expression::Identifier(name))
+        }
+    }
+
+    fn read_arguments(&mut self) -> ParserResult<Vec<Expression>> {
+        let mut arguments = Vec::new();
+
+        if let Some(Token::CloseParen) = self.peek_token()? {
+            return Ok(arguments);
+        }
+
+        loop {
+            arguments.push(self.read_expression()?);
+
+            token_match_some!(self, Unexpected{
+                Token::Comma => {
+                    if let Some(Token::CloseParen) = self.peek_token()? {
+                        self.read_token()?;
                         break;
                     }
                     continue;
                 },
                 Token::CloseParen => break,
-                token => Err(ParserError::UnexpectedToken(token)),
             })?;
         }
 
-        Ok(parameters)
+        Ok(arguments)
     }
 
     fn next_token(&mut self) -> ParserResult<Option<Token>> {
@@ -137,8 +216,12 @@ impl<R: Read> Parser<R> {
         }
     }
 
-    fn read_token(&mut self) -> Result<Option<Token>, ParserError> {
+    fn read_token(&mut self) -> ParserResult<Option<Token>> {
         self.lexer.next().map_err(ParserError::Lexer)
+    }
+
+    fn peek_token(&mut self) -> ParserResult<Option<&Token>> {
+        self.lexer.peek().map_err(ParserError::Lexer)
     }
 }
 
@@ -153,26 +236,33 @@ pub struct Declaration {
 pub enum DeclarationType {
     Constant,
     Variable,
-    MutableVariable,
 }
 
 #[derive(Debug)]
 pub enum Expression {
-    Function(Function),
+    Function {
+        type_name: String,
+        parameters: Vec<Parameter>,
+        value: Box<Expression>,
+    },
+    Call {
+        name: String,
+        arguments: Vec<Expression>,
+    },
+    Block(Vec<Statement>),
+    Identifier(String),
 }
-
-#[derive(Debug)]
-pub struct Function {
-    type_name: String,
-    parameters: Parameters,
-}
-
-pub type Parameters = Vec<Parameter>;
 
 #[derive(Debug)]
 pub struct Parameter {
     name: String,
     type_name: String,
+}
+
+#[derive(Debug)]
+pub enum Statement {
+    Return(Option<Expression>),
+    Expression(Expression),
 }
 
 pub type ParserResult<T> = Result<T, ParserError>;

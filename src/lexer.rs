@@ -60,6 +60,9 @@ impl<R: Read> Lexer<R> {
 
             '(' => consume!(self, Token::OpenParen),
             ')' => consume!(self, Token::CloseParen),
+            '{' => consume!(self, Token::OpenBrace),
+            '}' => consume!(self, Token::CloseBrace),
+            '=' => consume!(self, Token::Equals),
             ',' => consume!(self, Token::Comma),
             ':' => consume!(self, Token::Colon),
             ';' => consume!(self, Token::Semicolon),
@@ -82,6 +85,7 @@ impl<R: Read> Lexer<R> {
 
         Ok(Some(match ident.as_str() {
             "fn" => Token::Keyword(Keyword::Function),
+            "return" => Token::Keyword(Keyword::Return),
             _ => Token::Identifier(ident),
         }))
     }
@@ -137,14 +141,18 @@ pub enum Token {
 
     OpenParen,
     CloseParen,
+    OpenBrace,
+    CloseBrace,
     Comma,
     Colon,
+    Equals,
     Semicolon,
 }
 
 #[derive(Debug)]
 pub enum Keyword {
     Function,
+    Return,
 }
 
 pub type LexerResult<T> = Result<T, LexerError>;
